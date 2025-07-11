@@ -107,3 +107,122 @@ if __name__ == "__main__":
     set_webhook()
     threading.Thread(target=check_arbitrage).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    json()[0]
+        res[pair] = {"ask": float(d["lowest_ask"]), "bid": float(d["highest_bid"])}
+    return res
+
+# --- MEXC -------------------------------------------------------------
+def _mexc():
+    res = {}
+    for sym, pair in [("BTCUSDT", "BTC/USDT"), ("ETHUSDT", "ETH/USDT"), ("SOLUSDT", "SOL/USDT")]:
+        url = f"https://api.mexc.com/api/v3/ticker/bookTicker?symbol={sym}"
+        d   = requests.get(url, timeout=5).json()
+        res[pair] = {"ask": float(d["askPrice"]), "bid": float(d["bidPrice"])}
+    return res
+
+# ----------------------------------------------------------------------
+# 🎯 2.  Арбитраж и Telegram
+# ----------------------------------------------------------------------
+def check_arbitrage():
+    while True:
+        market_data = {ex: get_prices(ex) for ex in EXCHANGES}
+        checked = found = 0
+        for pair in TRADING_PAIRS:
+            for ex_buy in EXCHANGES:
+                for ex_sell in EXCHANGES:
+                    if ex_buy == ex_sell:
+                        continue
+                    try:
+                        buy  = market_data[ex_buy][pair]["ask"]
+                        sell = market_data[ex_sell][pair]["bid"]
+                        fee_b = FEES[ex_buy]  / 100
+                        fee_s = FEES[ex_sell] / 100
+                        spread = ((sell * (1 - fee_s)) - (buy * (1 + fee_b))) / (buy * (1 + fee_b))
+                        checked += 1
+                        if spread >= SPREAD_THRESHOLD:
+                            found += 1
+                            msg = (
+                                "🔁 *Arbitrage Opportunity!*\n"
+                                f"*Pair:* `{pair}`\n"
+                                f"*Buy on:* {ex_buy.upper()} at `{buy}`\n"
+                                f"*Sell on:* {ex_sell.upper()} at `{sell}`\n"
+                                f"*Profit:* `{spread*100:.2f}%`"
+                            )
+                            send_telegram(msg, parse_mode="Markdown")
+                    except KeyError:
+                        # цена не получена с одной из бирж
+                        continue
+                    except Exception as e:
+                        print("Calc error:", e)
+        print(f"✅ Checked {checked}, found {found} opportunities.")
+        time.sleep(20)
+
+# ----------------------------------------------------------------------
+# Telegram helpers
+# ----------------------------------------------------------------------
+def send_telegram(text, chat_id=None, parse_mode=None):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print("Telegram send error:", e)
+
+def send_start_buttons(chat_id):
+    # inline-кнопки
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "📊 Статус",   "callback_data": "status"}],
+            [{"text": "🪙 Пары",      "callback_data": "pairs"}],
+            [{"text": "⚙️ Порог",    "callback_data": "threshold"}]
+        ]
+    }
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": "👋 Привет! Выберите действие:",
+        "reply_markup": json.dumps(keyboard)
+    }
+    requests.post(url, json=payload, timeout=5)
+
+# ----------------------------------------------------------------------
+# Flask
+# ----------------------------------------------------------------------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Arbitrage bot is running!"
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = request.get_json()
+    # print(json.dumps(update, indent=2, ensure_ascii=False))
+    if "message" in update:
+        chat_id = update["message"]["chat"]["id"]
+        text    = update["message"].get("text", "").strip()
+
+        if text == "/start":
+            send_start_buttons(chat_id)
+
+    elif "callback_query" in update:
+        q       = update["callback_query"]
+        chat_id = q["message"]["chat"]["id"]
+        data    = q["data"]
+
+        if data == "status":
+            send_telegram("✅ Бот работает. Мониторинг активен.", chat_id)
+        elif data == "pairs":
+            send_telegram("🪙 Отслеживаемые пары:\n" + "\n".join(TRADING_PAIRS), chat_id)
+        elif data == "threshold":
+            send_telegram(f"⚙️ Порог: {SPREAD_THRESHOLD*100:.2f} %", chat_id)
+
+    return "", 200
+
+# ----------------------------------------------------------------------
+if name == "__main__":
+    # запустить бот
+    threading.Thread(target=check_arbitrage, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
