@@ -1,40 +1,44 @@
-import os, time, requests, datetime
+import time
+import requests
+from datetime import datetime
 from dotenv import load_dotenv
+import os
 
-# ───────────────────────────────────────────────────────────
-load_dotenv()                                    # .env рядом
-BOT_TOKEN  = os.getenv("8190525418:AAF-glDovTcw5YP4Yah9c_F-OhSrdY_kryo")     # токен твоего бота
-CHAT_ID    = os.getenv("323838150")       # ID чата (или группы)
-URL        = os.getenv("https://arbit-crxz.onrender.com")               # https://arbit-crxz.onrender.com
-INTERVAL   = int(os.getenv("PING_INTERVAL", 60)) # сек; по умолчанию 60
-# ───────────────────────────────────────────────────────────
+load_dotenv()
 
-was_down = False          # флаг «вчера лежали ли мы»
+URL_TO_PING = os.getenv("https://arbit-crxz.onrender.com")  # https://arbit-crxz.onrender.com
+BOT_TOKEN = os.getenv("8190525418:AAF-glDovTcw5YP4Yah9c_F-OhSrdY_kryo")
+CHAT_ID = os.getenv("323838150")
+LOG_FILE = "ping.log"
+INTERVAL_SECONDS = 300  # 5 минут
 
-def tg(text):
+def log(message):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a") as f:
+        f.write(f"[{timestamp}] {message}\n")
+    print(f"[{timestamp}] {message}")
+
+def send_telegram(text):
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text}, timeout=5
-        )
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": text}
+        requests.post(url, data=data, timeout=10)
     except Exception as e:
-        print("⚠️ Не смог отправить сообщение:", e)
+        log(f"❌ Failed to send Telegram message: {e}")
 
-while True:
+def ping():
     try:
-        r = requests.get(URL, timeout=10)
-        is_up = r.status_code == 200
-    except Exception:
-        is_up = False
+        res = requests.get(URL_TO_PING, timeout=10)
+        if res.status_code == 200:
+            log(f"✅ Ping OK: {res.status_code}")
+        else:
+            log(f"⚠️ Ping warning: {res.status_code}")
+            send_telegram(f"⚠️ Бот ответил с кодом {res.status_code}")
+    except Exception as e:
+        log(f"❌ Ping failed: {e}")
+        send_telegram(f"❌ Бот недоступен! Ошибка: {e}")
 
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{now}] {URL} → {'UP' if is_up else 'DOWN'}")
-
-    if is_up and was_down:
-        tg("✅ Бот снова в сети.")
-        was_down = False
-    elif not is_up and not was_down:
-        tg("❌ Бот недоступен!")
-        was_down = True
-
-    time.sleep(INTERVAL)
+if name == "__main__":
+    while True:
+        ping()
+        time.sleep(INTERVAL_SECONDS)
