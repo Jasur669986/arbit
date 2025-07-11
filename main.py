@@ -9,7 +9,14 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 WEBHOOK_URL        = os.getenv("WEBHOOK_URL")
 
 EXCHANGES      = ["binance", "htx", "bybit", "okx", "kucoin", "gate", "mexc"]
-TRADING_PAIRS  = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+TRADING_PAIRS  = [ "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
+    "MATIC/USDT", "LTC/USDT", "TRX/USDT", "TON/USDT", "SHIB/USDT",
+    "ATOM/USDT", "NEAR/USDT", "OP/USDT", "APT/USDT", "FIL/USDT",
+    "PEPE/USDT", "ARB/USDT", "SUI/USDT", "UNI/USDT", "ETC/USDT",
+    "INJ/USDT", "RUNE/USDT", "TIA/USDT", "SEI/USDT", "STX/USDT",
+    "BCH/USDT", "GALA/USDT", "IMX/USDT", "AAVE/USDT", "DYDX/USDT",
+    "HBAR/USDT", "EOS/USDT", "CRV/USDT", "FLOW/USDT", "MKR/USDT"]
 SPREAD_THRESHOLD = 0.001  # глобальная переменная, меняем через /setthreshold
 
 FEES = {
@@ -19,16 +26,75 @@ FEES = {
 
 def get_prices(exchange):
     try:
-        if exchange == "binance": return _binance()
-        if exchange == "htx":     return _htx()
-        if exchange == "bybit":   return _bybit()
-        if exchange == "okx":     return _okx()
-        if exchange == "kucoin":  return _kucoin()
-        if exchange == "gate":    return _gate()
-        if exchange == "mexc":    return _mexc()
+        res = {}
+        if exchange == "binance":
+            url = "https://api.binance.com/api/v3/ticker/bookTicker"
+            data = requests.get(url, timeout=5).json()
+            for d in data:
+                symbol = d["symbol"]
+                for pair in TRADING_PAIRS:
+                    sym = pair.replace("/", "")
+                    if symbol == sym:
+                        res[pair] = {"ask": float(d["askPrice"]), "bid": float(d["bidPrice"])}
+        elif exchange == "bybit":
+            url = "https://api.bybit.com/v2/public/tickers"
+            data = requests.get(url, timeout=5).json()["result"]
+            for d in data:
+                symbol = d["symbol"]
+                for pair in TRADING_PAIRS:
+                    sym = pair.replace("/", "")
+                    if symbol == sym:
+                        res[pair] = {"ask": float(d["ask_price"]), "bid": float(d["bid_price"])}
+        elif exchange == "okx":
+            res = {}
+            for pair in TRADING_PAIRS:
+                sym = pair.replace("/", "-").lower()
+                url = f"https://www.okx.com/api/v5/market/ticker?instId={sym}"
+                data = requests.get(url, timeout=5).json()
+                if "data" in data and data["data"]:
+                    d = data["data"][0]
+                    res[pair] = {"ask": float(d["askPx"]), "bid": float(d["bidPx"])}
+        elif exchange == "kucoin":
+            url = "https://api.kucoin.com/api/v1/market/allTickers"
+            data = requests.get(url, timeout=5).json()["data"]["ticker"]
+            for d in data:
+                symbol = d["symbol"]
+                for pair in TRADING_PAIRS:
+                    sym = pair.replace("/", "-")
+                    if symbol == sym:
+                        res[pair] = {"ask": float(d["sell"]), "bid": float(d["buy"])}
+        elif exchange == "gate":
+            url = "https://api.gate.io/api2/1/tickers"
+            data = requests.get(url, timeout=5).json()
+            for pair in TRADING_PAIRS:
+                sym = pair.replace("/", "_").lower()
+                if sym in data:
+                    d = data[sym]
+                    res[pair] = {"ask": float(d["lowestAsk"]), "bid": float(d["highestBid"])}
+        elif exchange == "mexc":
+            url = "https://api.mexc.com/api/v3/ticker/bookTicker"
+            data = requests.get(url, timeout=5).json()
+            for d in data:
+                symbol = d["symbol"]
+                for pair in TRADING_PAIRS:
+                    sym = pair.replace("/", "")
+                    if symbol == sym:
+                        res[pair] = {"ask": float(d["askPrice"]), "bid": float(d["bidPrice"])}
+        elif exchange == "htx":
+            res = {}
+            for pair in TRADING_PAIRS:
+                sym = pair.replace("/", "").lower()
+                url = f"https://api.huobi.pro/market/detail/merged?symbol={sym}"
+                data = requests.get(url, timeout=5).json()
+                if "tick" in data:
+                    res[pair] = {
+                        "ask": float(data["tick"]["ask"][0]),
+                        "bid": float(data["tick"]["bid"][0])
+                    }
+        return res
     except Exception as e:
-        print(f"{exchange.upper()} API error:", e)
-    return {}
+        print(f"[{exchange}] price error:", e)
+        return {}
 
 # Биржи (реальные API)
 def _binance():
