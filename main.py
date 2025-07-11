@@ -221,4 +221,4 @@ def webhook():
 # ----------------------------------------------------------------------
 if name == "__main__":
     threading.Thread(target=check_arbitrage, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))v
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
