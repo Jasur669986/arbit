@@ -1,114 +1,116 @@
-import os
-import time
-import threading
-import requests
+import os, time, threading, requests, json
 from flask import Flask, request
 from dotenv import load_dotenv
 
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
+WEBHOOK_URL        = os.getenv("WEBHOOK_URL")
 
-EXCHANGES = ["binance", "htx", "bybit", "okx", "kucoin", "gate", "mexc"]
-TRADING_PAIRS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-SPREAD_THRESHOLD = 0.001
+EXCHANGES      = ["binance", "htx", "bybit", "okx", "kucoin", "gate", "mexc"]
+TRADING_PAIRS  = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+SPREAD_THRESHOLD = 0.001  # 0.1 %
 
-FEES = {
+FEES = {          # % maker / taker (средние значения)
     "binance": 0.1, "htx": 0.2, "bybit": 0.1, "okx": 0.1,
-    "kucoin": 0.1, "gate": 0.2, "mexc": 0.1
+    "kucoin": 0.1,  "gate": 0.2, "mexc": 0.1
 }
 
-def get_prices(exchange):
+# ----------------------------------------------------------------------
+# 🎯 1.  Реальные цены с бирж
+# ----------------------------------------------------------------------
+def get_prices(exchange: str) -> dict[str, dict[str, float]]:
+    """
+    Возвращает: { "BTC/USDT": {"ask": ..., "bid": ...}, ... }
+    """
+    try:
+        if exchange == "binance":
+            return _binance()
+        if exchange == "htx":
+            return _htx()
+        if exchange == "bybit":
+            return _bybit()
+        if exchange == "okx":
+            return _okx()
+        if exchange == "kucoin":
+            return _kucoin()
+        if exchange == "gate":
+            return _gate()
+        if exchange == "mexc":
+            return _mexc()
+    except Exception as e:
+        print(f"{exchange.upper()} API error:", e)
+    return {}
+
+# --- Binance ----------------------------------------------------------
+def _binance():
+    url = "https://api.binance.com/api/v3/ticker/bookTicker"
+    data = requests.get(url, timeout=5).json()
+    symbols = {"BTCUSDT": "BTC/USDT", "ETHUSDT": "ETH/USDT", "SOLUSDT": "SOL/USDT"}
     return {
-        "BTC/USDT": {"ask": 63000.0, "bid": 63200.0},
-        "ETH/USDT": {"ask": 3500.0, "bid": 3550.0},
-        "SOL/USDT": {"ask": 140.0, "bid": 145.0}
+        symbols[i["symbol"]]: {"ask": float(i["askPrice"]), "bid": float(i["bidPrice"])}
+        for i in data if i["symbol"] in symbols
     }
 
-def check_arbitrage():
-    while True:
-        market_data = {ex: get_prices(ex) for ex in EXCHANGES}
-        checked, found = 0, 0
-        for pair in TRADING_PAIRS:
-            for ex1 in EXCHANGES:
-                for ex2 in EXCHANGES:
-                    if ex1 == ex2:
-                        continue
-                    try:
-                        buy = market_data[ex1][pair]["ask"]
-                        sell = market_data[ex2][pair]["bid"]
-                        fee_buy = FEES[ex1] / 100
-                        fee_sell = FEES[ex2] / 100
-                        spread = ((sell * (1 - fee_sell)) - (buy * (1 + fee_buy))) / (buy * (1 + fee_buy))
-                        checked += 1
-                        if spread >= SPREAD_THRESHOLD:
-                            found += 1
-                            msg = f"🔁 Arbitrage Opportunity!\n"                                   f"Pair: {pair}\n"                                   f"Buy on: {ex1.upper()} at {buy}\n"                                   f"Sell on: {ex2.upper()} at {sell}\n"                                   f"Profit: {spread*100:.2f}%"
-                            send_telegram(msg)
-                        else:
-                            print(f"[{pair}] {ex1}->{ex2}: spread={spread*100:.4f}%")
-                    except Exception as e:
-                        print(f"Error: {e}")
-        print(f"✅ Проверено {checked}, найдено {found}.")
-        time.sleep(20)
+# --- HTX (Huobi) ------------------------------------------------------
+def _htx():
+    url  = "https://api.huobi.pro/market/tickers"
+    resp = requests.get(url, timeout=5).json()
+    mapping = {"btcusdt": "BTC/USDT", "ethusdt": "ETH/USDT", "solusdt": "SOL/USDT"}
+    return {
+        mapping[i["symbol"]]: {"ask": float(i["ask"]), "bid": float(i["bid"])}
+        for i in resp.get("data", []) if i["symbol"] in mapping
+    }
 
-def send_telegram(message, chat_id=None):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": message}
-        requests.post(url, data=data, timeout=5)
-    except Exception as e:
-        print("Telegram Error:", e)
+# --- Bybit ------------------------------------------------------------
+def _bybit():
+    res = {}
+    for sym, pair in [("BTCUSDT", "BTC/USDT"), ("ETHUSDT", "ETH/USDT"), ("SOLUSDT", "SOL/USDT")]:
+        url  = f"https://api.bybit.com/v2/public/tickers?symbol={sym}"
+        j    = requests.get(url, timeout=5).json()
+        itm  = j["result"][0]
+        res[pair] = {"ask": float(itm["ask_price"]), "bid": float(itm["bid_price"])}
+    return res
 
-def check_bot():
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe"
-        res = requests.get(url).json()
-        print("🤖 Telegram Bot Info:", res)
-    except Exception as e:
-        print("Telegram Bot Error:", e)
+# --- OKX --------------------------------------------------------------
+def _okx():
+    url  = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
+    tick = {i["instId"]: i for i in requests.get(url, timeout=5).json()["data"]}
+    def conv(inst):
+        d = tick[inst]; return {"ask": float(d["askPx"]), "bid": float(d["bidPx"])}
+    return {
+        "BTC/USDT": conv("BTC-USDT"),
+        "ETH/USDT": conv("ETH-USDT"),
+        "SOL/USDT": conv("SOL-USDT")
+    }
 
-def set_webhook():
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
-        res = requests.post(url, data={"url": f"{WEBHOOK_URL}"})
-        print("🌐 Webhook set:", res.json())
-    except Exception as e:
-        print("Webhook Error:", e)
+# --- KuCoin -----------------------------------------------------------
+def _kucoin():
+    def get(symbol):
+        url = f"https://api.kucoin.com/api/v1/market/orderbook/level1?symbol={symbol}"
+        d   = requests.get(url, timeout=5).json()["data"]
+        return {"ask": float(d["price"]), "bid": float(d["bestBid"])}
+    return {
+        "BTC/USDT": get("BTC-USDT"),
+        "ETH/USDT": get("ETH-USDT"),
+        "SOL/USDT": get("SOL-USDT")
+    }
 
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "✅ Arbitrage bot is running!"
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json()
-    print("📥 Incoming:", update)
-
-    if "message" in update:
-        chat_id = update["message"]["chat"]["id"]
-        text = update["message"].get("text", "").strip()
-
-        if text == "/start":
-            send_telegram("👋 Привет! Я арбитражный бот. Я уведомлю тебя о выгодных сделках!", chat_id)
-        elif text == "/status":
-            send_telegram("✅ Бот работает. Мониторинг арбитражных возможностей активен.", chat_id)
-        else:
-            send_telegram(f"📡 Вы написали: {text}", chat_id)
-
-    return '', 200
-
-if __name__ == "__main__":
-    check_bot()
-    set_webhook()
-    threading.Thread(target=check_arbitrage).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
-    json()[0]
-        res[pair] = {"ask": float(d["lowest_ask"]), "bid": float(d["highest_bid"])}
+# --- Gate.io ----------------------------------------------------------
+def _gate():
+    res = {}
+    for cp, pair in [
+        ("BTC_USDT", "BTC/USDT"),
+        ("ETH_USDT", "ETH/USDT"),
+        ("SOL_USDT", "SOL/USDT"),
+    ]:
+        url = f"https://api.gateio.ws/api/v4/spot/tickers?currency_pair={cp}"
+        d   = requests.get(url, timeout=5).json()[0]
+        res[pair] = {
+        "ask": float(d["lowest_ask"]),
+            "bid": float(d["highest_bid"])
+        }
     return res
 
 # --- MEXC -------------------------------------------------------------
@@ -130,14 +132,13 @@ def check_arbitrage():
         for pair in TRADING_PAIRS:
             for ex_buy in EXCHANGES:
                 for ex_sell in EXCHANGES:
-                    if ex_buy == ex_sell:
-                        continue
+                    if ex_buy == ex_sell: continue
                     try:
                         buy  = market_data[ex_buy][pair]["ask"]
                         sell = market_data[ex_sell][pair]["bid"]
                         fee_b = FEES[ex_buy]  / 100
                         fee_s = FEES[ex_sell] / 100
-                        spread = ((sell * (1 - fee_s)) - (buy * (1 + fee_b))) / (buy * (1 + fee_b))
+                        spread = ((sell*(1-fee_s)) - (buy*(1+fee_b))) / (buy*(1+fee_b))
                         checked += 1
                         if spread >= SPREAD_THRESHOLD:
                             found += 1
@@ -150,7 +151,6 @@ def check_arbitrage():
                             )
                             send_telegram(msg, parse_mode="Markdown")
                     except KeyError:
-                        # цена не получена с одной из бирж
                         continue
                     except Exception as e:
                         print("Calc error:", e)
@@ -171,12 +171,11 @@ def send_telegram(text, chat_id=None, parse_mode=None):
         print("Telegram send error:", e)
 
 def send_start_buttons(chat_id):
-    # inline-кнопки
     keyboard = {
         "inline_keyboard": [
             [{"text": "📊 Статус",   "callback_data": "status"}],
-            [{"text": "🪙 Пары",      "callback_data": "pairs"}],
-            [{"text": "⚙️ Порог",    "callback_data": "threshold"}]
+            [{"text": "🪙 Пары",     "callback_data": "pairs"}],
+            [{"text": "⚙️ Порог",   "callback_data": "threshold"}]
         ]
     }
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -199,11 +198,10 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json()
-    # print(json.dumps(update, indent=2, ensure_ascii=False))
+
     if "message" in update:
         chat_id = update["message"]["chat"]["id"]
         text    = update["message"].get("text", "").strip()
-
         if text == "/start":
             send_start_buttons(chat_id)
 
@@ -211,9 +209,8 @@ def webhook():
         q       = update["callback_query"]
         chat_id = q["message"]["chat"]["id"]
         data    = q["data"]
-
         if data == "status":
-            send_telegram("✅ Бот работает. Мониторинг активен.", chat_id)
+            send_telegram("✅ Бот работает.Мониторинг активен.", chat_id)
         elif data == "pairs":
             send_telegram("🪙 Отслеживаемые пары:\n" + "\n".join(TRADING_PAIRS), chat_id)
         elif data == "threshold":
@@ -223,6 +220,5 @@ def webhook():
 
 # ----------------------------------------------------------------------
 if name == "__main__":
-    # запустить бот
     threading.Thread(target=check_arbitrage, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))v
