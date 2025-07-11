@@ -6,9 +6,9 @@ import os
 
 load_dotenv()
 
-URL_TO_PING = os.getenv("https://arbit-crxz.onrender.com")  # https://arbit-crxz.onrender.com
-BOT_TOKEN = os.getenv("8190525418:AAF-glDovTcw5YP4Yah9c_F-OhSrdY_kryo")
-CHAT_ID = os.getenv("323838150")
+URL_TO_PING = os.getenv("URL_TO_PING", "https://arbit-crxz.onrender.com")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8190525418:AAF-glDovTcw5YP4Yah9c_F-OhSrdY_kryo")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "323838150")
 LOG_FILE = "ping.log"
 INTERVAL_SECONDS = 300  # 5 минут
 
