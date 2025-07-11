@@ -1,14 +1,14 @@
 services:
   - type: web
-    name: arbitrage-bot
+    name: arbit
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     plan: free
-    envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
-      - key: WEBHOOK_URL
-        sync: false
+
+  - type: worker
+    name: pinger
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python pinger.py
+    plan: free
