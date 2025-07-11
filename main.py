@@ -3,6 +3,7 @@ from flask import Flask, request
 from dotenv import load_dotenv
 
 load_dotenv()
+UPTIME_TOKEN = os.getenv("UPTIME_TOKEN")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
@@ -277,7 +278,21 @@ def webhook():
         elif v=="pairs": send_telegram("🪙 "+"\n".join(TRADING_PAIRS), cid)
         elif v=="threshold": send_telegram(f"⚙️ {SPREAD_THRESHOLD*100:.2f}%", cid)
     return "", 200
+@app.route("/uptimerobot", methods=["POST"])
+def uptimerobot():
+    if request.args.get("token") != UPTIME_TOKEN:
+        return "❌ Invalid token", 403
 
+    alert = request.get_json(silent=True) or {}
+
+    alert_type = alert.get("alert_type_friendly", "Unknown Alert")
+    monitor_name = alert.get("monitor_friendly_name", "No Name")
+    message = alert.get("alert_details", "No details provided")
+
+    text = f"⚠️ *{alert_type}*\n🖥 *{monitor_name}*\n📄 {message}"
+    send_telegram(text)
+
+    return "✅ Alert received", 200
 if __name__=="__main__":
     threading.Thread(target=check_arbitrage, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
