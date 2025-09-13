@@ -30,6 +30,8 @@ SPREAD_THRESHOLD = 0.001  # 0.1%
 FEES = {ex: 0.1 for ex in EXCHANGES}
 FEES.update({"htx":0.2, "gate":0.2, "bithumb":0.25})
 
+last_alerts = {}  # защита от дубликатов
+
 def get_prices(exchange):
     try:
         func = globals().get(f"_{exchange}")
@@ -132,11 +134,13 @@ def _coinbase():
 
 def _kraken():
     res = {}
-    pairs = ",".join([p.replace("/", "") for p in TRADING_PAIRS])
-    j = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={pairs}", timeout=5).json().get("result", {})
+    j = requests.get("https://api.kraken.com/0/public/Ticker?pair=" + ",".join([p.replace("/", "USDT") for p in TRADING_PAIRS]), timeout=5).json().get("result", {})
     for k, v in j.items():
-        p = k[:-4] + "/USDT"
-        res[p] = {"ask":float(v["a"][0]), "bid":float(v["b"][0])}
+        if "a" in v and "b" in v:
+            if k.endswith("USDT"):
+                p = k[:-4] + "/USDT"
+                if p in TRADING_PAIRS:
+                    res[p] = {"ask":float(v["a"][0]), "bid":float(v["b"][0])}
     return res
 
 def _bitstamp():
@@ -179,35 +183,35 @@ def _poloniex():
 def _whitebit():
     res = {}
     for p in TRADING_PAIRS:
-        s = p.replace("/", "")
-        j = requests.get(f"https://whitebit.com/api/v4/public/ticker?market={s}", timeout=5).json()
-        o = j.get("result")
-        if o:
-            res[p] = {"ask":float(o["ask"]), "bid":float(o["bid"])}
+        s = p.replace("/", "_")
+        j = requests.get(f"https://whitebit.com/api/v4/public/ticker/{s}", timeout=5).json()
+        if "ask" in j and "bid" in j:
+            res[p] = {"ask":float(j["ask"]), "bid":float(j["bid"])}
     return res
 
 def _lbank():
     res = {}
-    j = requests.get("https://api.lbank.info/v1/ticker.do", timeout=5).json()
-    for o in j:
-        p = o["symbol"].upper().replace("_", "/").replace("USDT", "/USDT")
-        if p in TRADING_PAIRS:
-            res[p] = {"ask":float(o["sell"]), "bid":float(o["buy"])}
+    j = requests.get("https://api.lbkex.com/v2/ticker/24hr.do?symbol=all", timeout=5).json()
+    for o in j.get("data", []):
+        sym = o["symbol"].upper().replace("_", "/")
+        if sym in TRADING_PAIRS:
+            res[sym] = {"ask":float(o["ticker"]["high"]), "bid":float(o["ticker"]["low"])}
     return res
 
 def _crypto():
     res = {}
     for p in TRADING_PAIRS:
-        s = p.replace("/", "").upper()
-        j = requests.get(f"https://api.crypto.com/v2/public/get-book?instrument_name={s}", timeout=5).json()
-        bids = j.get("result", {}).get("bids")
-        if bids:
-            res[p] = {"bid":float(bids[0][0]), "ask":float(bids[0][0])}
+        s = p.replace("/", "_")
+        j = requests.get(f"https://api.crypto.com/v2/public/get-ticker?instrument_name={s}", timeout=5).json()
+        d = j.get("result", {}).get("data", {})
+        if d:
+            res[p] = {"ask":float(d["a"]), "bid":float(d["b"])}
     return res
 
 # ------------------------ арбитраж и Telegram ------------------------
 
 def check_arbitrage():
+    global last_alerts
     while True:
         md = {ex: get_prices(ex) for ex in EXCHANGES}
         checked = found = 0
@@ -222,18 +226,23 @@ def check_arbitrage():
                         spread = ((s*(1-fs)) - (b*(1+fb))) / (b*(1+fb))
                         checked += 1
                         if spread >= SPREAD_THRESHOLD:
+                            key = f"{p}:{e1}:{e2}"
+                            if key in last_alerts and time.time()-last_alerts[key] < 300:
+                                continue
+                            last_alerts[key] = time.time()
                             found += 1
                             msg = (
-                                "🔁 *Arbitrage Opportunity!*\n"
+                            "🔁 *Arbitrage Opportunity!*\n"
                                 f"*Pair:* `{p}`\n"
                                 f"*Buy:* {e1} at `{b}`\n"
                                 f"*Sell:* {e2} at `{s}`\n"
-                                f"*Profit:* `{spread*100:.2f}%`"
+                                f"*Profit:* {spread*100:.2f}%"
                             )
                             send_telegram(msg, parse_mode="Markdown")
                     except: pass
         print(f"✅ Checked {checked}, found {found}")
         time.sleep(20)
+
 def send_telegram(text, chat_id=None, parse_mode=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": text}
@@ -278,21 +287,19 @@ def webhook():
         elif v=="pairs": send_telegram("🪙 "+"\n".join(TRADING_PAIRS), cid)
         elif v=="threshold": send_telegram(f"⚙️ {SPREAD_THRESHOLD*100:.2f}%", cid)
     return "", 200
+
 @app.route("/uptimerobot", methods=["POST"])
 def uptimerobot():
     if request.args.get("token") != UPTIME_TOKEN:
         return "❌ Invalid token", 403
-
     alert = request.get_json(silent=True) or {}
-
     alert_type = alert.get("alert_type_friendly", "Unknown Alert")
     monitor_name = alert.get("monitor_friendly_name", "No Name")
     message = alert.get("alert_details", "No details provided")
-
     text = f"⚠️ *{alert_type}*\n🖥 *{monitor_name}*\n📄 {message}"
     send_telegram(text)
-
     return "✅ Alert received", 200
-if __name__=="__main__":
+
+if name == "__main__":
     threading.Thread(target=check_arbitrage, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
