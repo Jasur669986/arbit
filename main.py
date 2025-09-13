@@ -300,6 +300,6 @@ def uptimerobot():
     send_telegram(text)
     return "✅ Alert received", 200
 
-if name == "__main__":
+if __name__ == "__main__":
     threading.Thread(target=check_arbitrage, daemon=True).start()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
