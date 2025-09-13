@@ -1,305 +1,324 @@
-import os, time, threading, requests, json
+import os
+import time
+import math
+import json
+import threading
+import traceback
+from collections import defaultdict
+
+import requests
 from flask import Flask, request
 from dotenv import load_dotenv
 
 load_dotenv()
-UPTIME_TOKEN = os.getenv("UPTIME_TOKEN")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL        = os.getenv("WEBHOOK_URL")
+# try import ccxt
+try:
+    import ccxt
+except Exception as e:
+    raise ImportError("ccxt is required. Install: pip install ccxt") from e
 
-EXCHANGES = [
-    "binance", "htx", "bybit", "okx", "kucoin", "gate", "mexc",
-    "bitget", "coinbase", "kraken", "bitstamp", "bithumb",
-    "bitfinex", "poloniex", "whitebit", "lbank", "crypto"
+# ----------------- CONFIG -----------------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+PORT = int(os.getenv("PORT", 10000))
+
+POLL_INTERVAL = 30                 # seconds between full scans (default 30)
+SPREAD_THRESHOLD = 0.001           # minimal relative spread to alert (0.001 == 0.1%)
+MAX_SPREAD = 0.10                  # ignore spreads > 10% as likely fake
+MIN_LIQUIDITY_USD = 1000.0         # minimal USD depth on both sides (if orderbook available)
+ALERT_COOLDOWN = 300               # seconds to suppress duplicate alerts
+ORDERBOOK_LEVELS = 5               # top levels to sum for liquidity checks
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) arbit-bot/1.0"}
+
+# Exchange ids we will try to instantiate (ccxt ids / common names)
+EXCHANGE_IDS = [
+    "binance", "huobipro", "bybit", "okx", "kucoin", "gateio", "mexc",
+    "bitget", "coinbasepro", "kraken", "bitstamp", "bithumb",
+    "bitfinex", "poloniex", "whitebit", "lbank", "coinex", "bittrex"
 ]
 
+# Default fees: set to 0.0 (not hardcoded). You can set per-exchange at runtime via /setfee
+FEES = defaultdict(lambda: 0.0)
+
+# 40 USDT pairs
 TRADING_PAIRS = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-    "DOGE/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOT/USDT",
-    "MATIC/USDT", "LTC/USDT", "TRX/USDT", "TON/USDT", "SHIB/USDT",
-    "ATOM/USDT", "NEAR/USDT", "OP/USDT", "APT/USDT", "FIL/USDT",
-    "PEPE/USDT", "ARB/USDT", "SUI/USDT", "UNI/USDT", "ETC/USDT",
-    "INJ/USDT", "RUNE/USDT", "TIA/USDT", "SEI/USDT", "STX/USDT",
-    "BCH/USDT", "GALA/USDT", "IMX/USDT", "AAVE/USDT", "DYDX/USDT",
-    "HBAR/USDT", "EOS/USDT", "CRV/USDT", "FLOW/USDT", "MKR/USDT"
+    "BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
+    "DOGE/USDT","TON/USDT","TRX/USDT","ADA/USDT","MATIC/USDT",
+    "AVAX/USDT","DOT/USDT","SHIB/USDT","LTC/USDT","BCH/USDT",
+    "UNI/USDT","LINK/USDT","ATOM/USDT","XLM/USDT","NEAR/USDT",
+    "APT/USDT","OP/USDT","ARB/USDT","FIL/USDT","ETC/USDT",
+    "ICP/USDT","HBAR/USDT","SAND/USDT","AXS/USDT","FLOW/USDT",
+    "CHZ/USDT","EOS/USDT","RUNE/USDT","ALGO/USDT","MANA/USDT",
+    "DYDX/USDT","GRT/USDT","CRV/USDT","1INCH/USDT","MKR/USDT"
 ]
 
-SPREAD_THRESHOLD = 0.001  # 0.1%
-FEES = {ex: 0.1 for ex in EXCHANGES}
-FEES.update({"htx":0.2, "gate":0.2, "bithumb":0.25})
+# ----------------- State -----------------
+last_alerts = {}   # key -> timestamp
+running = True
+exchange_instances = {}  # id -> ccxt instance
 
-last_alerts = {}  # защита от дубликатов
-
-def get_prices(exchange):
-    try:
-        func = globals().get(f"_{exchange}")
-        return func() if func else {}
-    except Exception as e:
-        print(f"[{exchange}] API error:", e)
-        return {}
-
-# ------------------------ биржевые функции ------------------------
-
-def _binance():
-    res = {}
-    data = requests.get("https://api.binance.com/api/v3/ticker/bookTicker", timeout=5).json()
-    for d in data:
-        sym = d["symbol"]
-        for p in TRADING_PAIRS:
-            if sym == p.replace("/", ""):
-                res[p] = {"ask":float(d["askPrice"]), "bid":float(d["bidPrice"])}
-    return res
-
-def _htx():
-    res = {}
-    for p in TRADING_PAIRS:
-        sym = p.replace("/", "").lower()
-        j = requests.get(f"https://api.huobi.pro/market/detail/merged?symbol={sym}", timeout=5).json()
-        t = j.get("tick")
-        if t:
-            res[p] = {"ask":float(t["ask"][0]), "bid":float(t["bid"][0])}
-    return res
-
-def _bybit():
-    res = {}
-    j = requests.get("https://api.bybit.com/v2/public/tickers", timeout=5).json()["result"]
-    for d in j:
-        sym = d["symbol"]
-        for p in TRADING_PAIRS:
-            if sym == p.replace("/", ""):
-                res[p] = {"ask":float(d["ask_price"]), "bid":float(d["bid_price"])}
-    return res
-
-def _okx():
-    res = {}
-    for p in TRADING_PAIRS:
-        inst = p.replace("/", "-")
-        j = requests.get(f"https://www.okx.com/api/v5/market/ticker?instId={inst}", timeout=5).json()
-        d = j.get("data")
-        if d:
-            ask, bid = float(d[0]["askPx"]), float(d[0]["bidPx"])
-            res[p] = {"ask":ask, "bid":bid}
-    return res
-
-def _kucoin():
-    res = {}
-    j = requests.get("https://api.kucoin.com/api/v1/market/allTickers", timeout=5).json()["data"]["ticker"]
-    for d in j:
-        sym = d["symbol"]
-        for p in TRADING_PAIRS:
-            if sym == p.replace("/", "-"):
-                res[p] = {"ask":float(d["sell"]), "bid":float(d["buy"])}
-    return res
-
-def _gate():
-    res = {}
-    j = requests.get("https://api.gate.io/api2/1/tickers", timeout=5).json()
-    for p in TRADING_PAIRS:
-        key = p.replace("/", "_").lower()
-        o = j.get(key)
-        if o:
-            res[p] = {"ask":float(o["lowestAsk"]), "bid":float(o["highestBid"])}
-    return res
-
-def _mexc():
-    res = {}
-    j = requests.get("https://api.mexc.com/api/v3/ticker/bookTicker", timeout=5).json()
-    for d in j:
-        for p in TRADING_PAIRS:
-            if d["symbol"] == p.replace("/", ""):
-                res[p] = {"ask":float(d["askPrice"]), "bid":float(d["bidPrice"])}
-    return res
-
-def _bitget():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "").lower()
-        j = requests.get(f"https://api.bitget.com/api/spot/v3/public/ticker/{s}", timeout=5).json()
-        d = j.get("data")
-        if d:
-            res[p] = {"ask":float(d["sell"]), "bid":float(d["buy"])}
-    return res
-
-def _coinbase():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "-")
-        r = requests.get(f"https://api.exchange.coinbase.com/products/{s}/ticker", timeout=5)
-        if r.ok:
-            o = r.json()
-            res[p] = {"ask":float(o["ask"]), "bid":float(o["bid"])}
-    return res
-
-def _kraken():
-    res = {}
-    j = requests.get("https://api.kraken.com/0/public/Ticker?pair=" + ",".join([p.replace("/", "USDT") for p in TRADING_PAIRS]), timeout=5).json().get("result", {})
-    for k, v in j.items():
-        if "a" in v and "b" in v:
-            if k.endswith("USDT"):
-                p = k[:-4] + "/USDT"
-                if p in TRADING_PAIRS:
-                    res[p] = {"ask":float(v["a"][0]), "bid":float(v["b"][0])}
-    return res
-
-def _bitstamp():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "").lower()
-        j = requests.get(f"https://www.bitstamp.net/api/v2/ticker/{s}/", timeout=5).json()
-        res[p] = {"ask":float(j["ask"]), "bid":float(j["bid"])}
-    return res
-
-def _bithumb():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "").lower()
-        j = requests.get(f"https://api.bithumb.com/public/ticker/{s}", timeout=5).json()
-        d = j.get("data")
-        if d:
-            res[p] = {"ask":float(d["sell_price"]), "bid":float(d["buy_price"])}
-    return res
-
-def _bitfinex():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "").upper()
-        j = requests.get(f"https://api-pub.bitfinex.com/v2/ticker/t{s}", timeout=5).json()
-        res[p] = {"ask":float(j[2]), "bid":float(j[0])}
-    return res
-
-def _poloniex():
-    res = {}
-    j = requests.get("https://poloniex.com/public?command=returnTicker", timeout=5).json()
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "")
-        key = f"USDT_{s}"
-        o = j.get(key)
-        if o:
-            res[p] = {"ask":float(o["lowestAsk"]), "bid":float(o["highestBid"])}
-    return res
-
-def _whitebit():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "_")
-        j = requests.get(f"https://whitebit.com/api/v4/public/ticker/{s}", timeout=5).json()
-        if "ask" in j and "bid" in j:
-            res[p] = {"ask":float(j["ask"]), "bid":float(j["bid"])}
-    return res
-
-def _lbank():
-    res = {}
-    j = requests.get("https://api.lbkex.com/v2/ticker/24hr.do?symbol=all", timeout=5).json()
-    for o in j.get("data", []):
-        sym = o["symbol"].upper().replace("_", "/")
-        if sym in TRADING_PAIRS:
-            res[sym] = {"ask":float(o["ticker"]["high"]), "bid":float(o["ticker"]["low"])}
-    return res
-
-def _crypto():
-    res = {}
-    for p in TRADING_PAIRS:
-        s = p.replace("/", "_")
-        j = requests.get(f"https://api.crypto.com/v2/public/get-ticker?instrument_name={s}", timeout=5).json()
-        d = j.get("result", {}).get("data", {})
-        if d:
-            res[p] = {"ask":float(d["a"]), "bid":float(d["b"])}
-    return res
-
-# ------------------------ арбитраж и Telegram ------------------------
-
-def check_arbitrage():
-    global last_alerts
-    while True:
-        md = {ex: get_prices(ex) for ex in EXCHANGES}
-        checked = found = 0
-        for p in TRADING_PAIRS:
-            for e1 in EXCHANGES:
-                for e2 in EXCHANGES:
-                    if e1 == e2: continue
-                    try:
-                        b = md[e1][p]["ask"]
-                        s = md[e2][p]["bid"]
-                        fb, fs = FEES[e1]/100, FEES[e2]/100
-                        spread = ((s*(1-fs)) - (b*(1+fb))) / (b*(1+fb))
-                        checked += 1
-                        if spread >= SPREAD_THRESHOLD:
-                            key = f"{p}:{e1}:{e2}"
-                            if key in last_alerts and time.time()-last_alerts[key] < 300:
-                                continue
-                            last_alerts[key] = time.time()
-                            found += 1
-                            msg = (
-                            "🔁 *Arbitrage Opportunity!*\n"
-                                f"*Pair:* `{p}`\n"
-                                f"*Buy:* {e1} at `{b}`\n"
-                                f"*Sell:* {e2} at `{s}`\n"
-                                f"*Profit:* {spread*100:.2f}%"
-                            )
-                            send_telegram(msg, parse_mode="Markdown")
-                    except: pass
-        print(f"✅ Checked {checked}, found {found}")
-        time.sleep(20)
-
-def send_telegram(text, chat_id=None, parse_mode=None):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    data = {"chat_id": chat_id or TELEGRAM_CHAT_ID, "text": text}
-    if parse_mode: data["parse_mode"] = parse_mode
-    try: requests.post(url, json=data, timeout=5)
-    except: pass
-
-def send_start_buttons(chat_id):
-    kb = {"inline_keyboard":[
-        [{"text":"📊 Статус","callback_data":"status"}],
-        [{"text":"🪙 Пары","callback_data":"pairs"}],
-        [{"text":"⚙️ Порог","callback_data":"threshold"}]
-    ]}
-    payload = {"chat_id":chat_id,"text":"👋 Выберите:","reply_markup":json.dumps(kb)}
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload)
-
+# ----------------- Flask -----------------
 app = Flask(__name__)
 
+# ----------------- Telegram -----------------
+def telegram_send(text, parse_mode=None, chat_id=None):
+    token = TELEGRAM_BOT_TOKEN
+    cid = chat_id or TELEGRAM_CHAT_ID
+    if not token or not cid:
+        print("[telegram] token or chat_id missing")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": cid, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    try:
+        requests.post(url, json=payload, timeout=8)
+    except Exception as e:
+        print("[telegram] send error:", e)
+
+# ----------------- Helpers -----------------
+def safe_fetch_ticker(exchange, pair):
+    """
+    Try fetch_ticker for the pair using ccxt exchange instance.
+    Returns (bid, ask) or (None, None)
+    """
+    try:
+        if not exchange:
+            return None, None
+        if not exchange.has.get('fetchTicker', False):
+            return None, None
+        ticker = exchange.fetch_ticker(pair)
+        if not ticker:
+            return None, None
+        bid = ticker.get('bid')
+        ask = ticker.get('ask')
+        if bid is None and 'last' in ticker:
+            bid = ticker.get('last')
+        if ask is None and 'last' in ticker:
+            ask = ticker.get('last')
+        if bid is None or ask is None:
+            return None, None
+        return float(bid), float(ask)
+    except Exception:
+        return None, None
+
+def safe_fetch_orderbook_usd(exchange, pair, depth=ORDERBOOK_LEVELS, side='bid'):
+    """
+    Return estimated USD value available on given side (bid or ask) summing top 'depth' levels.
+    If not available or error -> None
+    """
+    try:
+        if not exchange or not exchange.has.get('fetchOrderBook', False):
+            return None
+        ob = exchange.fetch_order_book(pair, depth)
+        levels = ob.get('bids') if side == 'bid' else ob.get('asks')
+        if not levels:
+            return None
+        usd = 0.0
+        for price, amount in levels[:depth]:
+            usd += float(price) * float(amount)
+        return usd
+    except Exception:
+        return None
+
+def create_exchange_instance(ccxt_name):
+    """
+    Instantiate ccxt exchange by name (tries some aliases).
+    """
+    cls = None
+    if hasattr(ccxt, ccxt_name):
+        cls = getattr(ccxt, ccxt_name)
+    else:
+        # try some fallbacks
+        alt_map = {
+            "huobipro": "huobi",
+            "gateio": "gateio",
+            "coinbasepro": "coinbasepro",
+            "mexc": "mexc",
+            "bittrex": "bittrex",
+            "whitebit": "whitebit",
+            "lbank": "lbank",
+        }
+        if ccxt_name in alt_map and hasattr(ccxt, alt_map[ccxt_name]):
+            cls = getattr(ccxt, alt_map[ccxt_name])
+        else:
+            name_try = ccxt_name.replace("-", "").replace("_", "")
+            for attr in dir(ccxt):
+                if attr.lower() == name_try.lower():
+                    cls = getattr(ccxt, attr)
+                    break
+    if not cls:
+        return None
+    try:
+        inst = cls({'enableRateLimit': True})
+        try:
+            inst.headers.update(HEADERS)
+        except Exception:
+            pass
+        try:
+            inst.load_markets()
+        except Exception:
+            pass
+        return inst
+    except Exception:
+        return None
+
+def init_exchanges():
+    for ex_id in EXCHANGE_IDS:
+        inst = create_exchange_instance(ex_id)
+        if inst:
+            exchange_instances[ex_id] = inst
+            print(f"[init] loaded: {ex_id} (ccxt id: {getattr(inst, 'id', 'unknown')})")
+        else:
+            print(f"[init] failed to load: {ex_id}")
+
+# ----------------- Core arbitrage check -----------------
+def check_arbitrage_once():
+    global last_alerts
+    markets = {}  # exchange -> pair -> {bid,ask}
+    # fetch tickers
+    for ex_name, ex_inst in exchange_instances.items():
+        markets[ex_name] = {}
+        for pair in TRADING_PAIRS:
+            try:
+                bid, ask = safe_fetch_ticker(ex_inst, pair)
+                if bid and ask:
+                    markets[ex_name][pair] = {"bid": float(bid), "ask": float(ask)}
+            except Exception:
+                pass
+
+    checked = 0
+    found = []
+    for pair in TRADING_PAIRS:
+        for e_buy in exchange_instances.keys():
+            for e_sell in exchange_instances.keys():
+                if e_buy == e_sell:
+                    continue
+                b_obj = markets.get(e_buy, {}).get(pair)
+                s_obj = markets.get(e_sell, {}).get(pair)
+                if not b_obj or not s_obj:
+                    continue
+                try:
+                    buy_price = float(b_obj["ask"])   # price to buy on buy-exchange
+                    sell_price = float(s_obj["bid"])  # price to sell on sell-exchange
+                    fb = FEES.get(e_buy, 0.0) / 100.0
+                    fs = FEES.get(e_sell, 0.0) / 100.0
+                    effective_buy = buy_price * (1 + fb)
+                    effective_sell = sell_price * (1 - fs)
+                    spread = (effective_sell - effective_buy) / effective_buy  # relative
+                    checked += 1
+                    if spread >= SPREAD_THRESHOLD and spread <= MAX_SPREAD:
+                        buy_liq = safe_fetch_orderbook_usd(exchange_instances[e_buy], pair, side='ask') or 0.0
+                        sell_liq = safe_fetch_orderbook_usd(exchange_instances[e_sell], pair, side='bid') or 0.0
+                        if (buy_liq and buy_liq < MIN_LIQUIDITY_USD) or (sell_liq and sell_liq < MIN_LIQUIDITY_USD):
+                            print(f"[liquidity-skip] {pair} {e_buy}->{e_sell} spread={spread*100:.2f}% buy_liq={buy_liq} sell_liq={sell_liq}")
+                            continue
+                        key = f"{pair}:{e_buy}:{e_sell}:{round(spread,6)}"
+                        last_time = last_alerts.get(key, 0)
+                        if time.time() - last_time < ALERT_COOLDOWN:
+                            continue
+                        last_alerts[key] = time.time()
+                        profit_pct = spread * 100
+                        msg = (
+                            "🔁 *Arbitrage Opportunity!*\n"
+                            f"*Pair:* `{pair}`\n"
+                            f"*Buy:* {e_buy} at {buy_price} (fee {FEES.get(e_buy,0.0)}%)\n"
+                            f"*Sell:* {e_sell} at {sell_price} (fee {FEES.get(e_sell,0.0)}%)\n"
+                            f"*Profit (after fees):* `{profit_pct:.2f}%`\n"
+                            f"*Buy liquidity(top {ORDERBOOK_LEVELS}):* {buy_liq:.2f} USD\n"
+                            f"*Sell liquidity(top {ORDERBOOK_LEVELS}):* {sell_liq:.2f} USD\n"
+                        )
+                        telegram_send(msg, parse_mode="Markdown")
+                        found.append((pair, e_buy, e_sell, profit_pct))
+                except Exception as e:
+                    # don't spam logs
+                    print(f"[compare error] {pair} {e_buy}->{e_sell}: {e}")
+    print(f"✅ Checked {checked} comparisons, found {len(found)} opportunities")
+    return found
+
+# ----------------- Loop worker -----------------
+def loop_worker():
+    while running:
+        try:
+            check_arbitrage_once()
+        except Exception as e:
+            print("Error in loop:", e)
+            traceback.print_exc()
+        time.sleep(POLL_INTERVAL)
+
+# ----------------- Flask endpoints -----------------
 @app.route("/", methods=["GET"])
-def home(): return "✅ Bot is running!"
+def home():
+    return "Arbitrage bot running"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    global SPREAD_THRESHOLD
-    u = request.get_json()
-    if "message" in u:
-        cid = u["message"]["chat"]["id"]
-        t = u["message"].get("text","").strip()
-        if t=="/start": send_start_buttons(cid)
-        elif t=="/status": send_telegram("✅ Работаю", cid)
-        elif t=="/pairs": send_telegram("🪙 "+"\n".join(TRADING_PAIRS), cid)
-        elif t.startswith("/setthreshold"):
+    """
+    Telegram webhook handler.
+    Commands:
+      /start
+      /stop
+      /status
+      /pairs
+      /setthreshold <percent>  (e.g. /setthreshold 0.1  for 0.1%)
+      /setfee <exchange> <percent> (e.g. /setfee binance 0.1)
+      /setinterval <seconds>
+    """
+    global running, SPREAD_THRESHOLD, POLL_INTERVAL
+    upd = request.get_json(silent=True) or {}
+    if "message" in upd:
+        m = upd["message"]
+        chat_id = m["chat"]["id"]
+        text = m.get("text", "").strip()
+        if text == "/start":
+            telegram_send("👋 Bot running. Commands: /status /pairs /setthreshold /setfee /setinterval", chat_id=chat_id)
+        elif text == "/stop":
+            running = False
+            telegram_send("🛑 Bot stopped (background worker will exit).", chat_id=chat_id)
+        elif text == "/status":
+            telegram_send("✅ Bot is running" if running else "❌ Bot stopped", chat_id=chat_id)
+            telegram_send(f"Monitoring {len(exchange_instances)} exchanges, {len(TRADING_PAIRS)} pairs. Poll every {POLL_INTERVAL}s.", chat_id=chat_id)
+        elif text == "/pairs":
+            telegram_send("Tracked pairs:\n" + ", ".join(TRADING_PAIRS), chat_id=chat_id)
+        elif text.startswith("/setthreshold"):
             try:
-                SPREAD_THRESHOLD = float(t.split()[1])/100
-                send_telegram(f"✅ Новый порог: {SPREAD_THRESHOLD*100:.2f}%", cid)
-            except:
-                send_telegram("❌ Формат: /setthreshold 0.3", cid)
-    elif "callback_query" in u:
-        d = u["callback_query"]
-        cid = d["message"]["chat"]["id"]; v = d["data"]
-        if v=="status": send_telegram("✅ Работаю", cid)
-        elif v=="pairs": send_telegram("🪙 "+"\n".join(TRADING_PAIRS), cid)
-        elif v=="threshold": send_telegram(f"⚙️ {SPREAD_THRESHOLD*100:.2f}%", cid)
+                val = float(text.split()[1])
+                SPREAD_THRESHOLD = val/100.0 if val > 1 else val
+                telegram_send(f"✅ New spread threshold: {SPREAD_THRESHOLD*100:.6f}%", chat_id=chat_id)
+            except Exception:
+                telegram_send("❌ Usage: /setthreshold 0.1  (for 0.1%) or /setthreshold 0.001 (decimal)", chat_id=chat_id)
+        elif text.startswith("/setfee"):
+            try:
+                parts = text.split()
+                ex = parts[1].strip()
+                per = float(parts[2])
+                FEES[ex] = per
+                telegram_send(f"✅ Fee for {ex} set to {per}%", chat_id=chat_id)
+            except Exception:
+                telegram_send("❌ Usage: /setfee <exchange> <percent>  e.g. /setfee binance 0.1", chat_id=chat_id)
+        elif text.startswith("/setinterval"):
+            try:
+                sec = int(text.split()[1])
+                if sec < 5:
+                    telegram_send("❌ Interval too small; choose >=5s", chat_id=chat_id)
+                else:
+                    POLL_INTERVAL = sec
+                    telegram_send(f"✅ Poll interval set to {POLL_INTERVAL}s", chat_id=chat_id)
+            except Exception:
+                telegram_send("❌ Usage: /setinterval <seconds>", chat_id=chat_id)
     return "", 200
 
-@app.route("/uptimerobot", methods=["POST"])
-def uptimerobot():
-    if request.args.get("token") != UPTIME_TOKEN:
-        return "❌ Invalid token", 403
-    alert = request.get_json(silent=True) or {}
-    alert_type = alert.get("alert_type_friendly", "Unknown Alert")
-    monitor_name = alert.get("monitor_friendly_name", "No Name")
-    message = alert.get("alert_details", "No details provided")
-    text = f"⚠️ *{alert_type}*\n🖥 *{monitor_name}*\n📄 {message}"
-    send_telegram(text)
-    return "✅ Alert received", 200
+# ----------------- Entrypoint -----------------
+def start_bot():
+    print("[start] initializing exchanges...")
+    init_exchanges()
+    print("[start] starting loop worker thread")
+    t = threading.Thread(target=loop_worker, daemon=True)
+    t.start()
+    print("[start] starting flask app")
+    app.run(host="0.0.0.0", port=PORT)
 
-if __name__ == "__main__":
-    threading.Thread(target=check_arbitrage, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",10000)))
+if name == "__main__":
+    start_bot()
